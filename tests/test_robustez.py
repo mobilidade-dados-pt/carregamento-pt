@@ -289,6 +289,64 @@ class TestRobustez(Base):
         self.assertEqual(am[-1]["ok"], "1")
 
 
+class TestResumoPublico(Base):
+    """O resumo é público: sem contagens por estado, erros só com tipo e mensagem."""
+
+    def test_execucao_normal_sem_estados_com_preenchimento(self):
+        self.proxima_execucao()
+        resumo = self.correr(Feed(self.relogio, status=[status_xml(self.pub0)], infra=[INFRA]))
+        self.assertIn("Preenchimento dos atributos do inventário", resumo)
+        self.assertIn("| local |", resumo)
+        self.assertIn("| ponto |", resumo)
+        self.assertNotIn("Estados no feed", resumo)
+        for st in ("`available`", "`charging`", "`outOfOrder`"):
+            self.assertNotIn(st, resumo)
+
+    def test_erro_interno_sem_traceback(self):
+        self.proxima_execucao()
+        with mock.patch.object(collect, "record_tariffs", side_effect=ValueError("teste\nsegunda linha")), \
+                mock.patch.object(collect, "fetch", Feed(self.relogio, status=[status_xml(self.pub0)])):
+            with self.assertRaises(ValueError):
+                collect.main()
+        resumo = "\n".join(collect.SUMMARY)
+        self.assertIn("> ❌ Erro interno: `ValueError: teste`", resumo)
+        self.assertNotIn("Traceback", resumo)
+        self.assertNotIn("```", resumo)
+        self.assertNotIn("segunda linha", resumo)
+
+    def test_feed_vazio_sem_excerto_xml(self):
+        with mock.patch.object(collect, "parse_status", return_value=([], "<excerto/>", None)):
+            resumo = self.correr(Feed(self.relogio, status=[status_xml(self.pub0)]))
+        self.assertIn("> ❌ Feed vazio ou parcial (0 pontos)", resumo)
+        self.assertNotIn("```", resumo)
+        self.assertNotIn("<", resumo)
+
+    def test_xml_invalido_so_tipo_e_mensagem(self):
+        truncado = status_xml(self.pub0)[:400]
+        resumo = self.correr(Feed(self.relogio, status=[truncado, truncado]))
+        linhas = [l for l in resumo.splitlines() if l.startswith("> ❌")]
+        self.assertEqual(len(linhas), 1)
+        self.assertIn("XML inválido", linhas[0])
+        self.assertIn("XMLSyntaxError", linhas[0])
+        self.assertNotIn("```", resumo)
+        for trecho in ("<?xml", "<d2:", "<!--", "datex2.eu"):  # nada do conteúdo da resposta
+            self.assertNotIn(trecho, resumo)
+
+    def test_modo_privado_mantem_detalhe(self):
+        with mock.patch.object(C, "PUBLIC_SUMMARY", False):
+            resumo = self.correr(Feed(self.relogio, status=[status_xml(self.pub0)], infra=[INFRA]))
+            self.assertIn("Estados no feed", resumo)
+            self.assertIn("`available`", resumo)
+            self.proxima_execucao()
+            collect.SUMMARY.clear()
+            with mock.patch.object(collect, "record_tariffs", side_effect=ValueError("teste")), \
+                    mock.patch.object(collect, "fetch",
+                                      Feed(self.relogio, status=[status_xml(self.pub0 + timedelta(minutes=5))])):
+                with self.assertRaises(ValueError):
+                    collect.main()
+        self.assertIn("Traceback", "\n".join(collect.SUMMARY))
+
+
 class TestGravacaoAtomica(Base):
     def test_d_corte_em_append_gz_csv(self):
         p = self.state / "events" / "2026-01-01.csv.gz"

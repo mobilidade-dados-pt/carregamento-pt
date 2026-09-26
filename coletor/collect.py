@@ -42,6 +42,16 @@ def md(x):
     return str(x).replace("|", "\\|")
 
 
+def erro_curto(e):
+    """Tipo e mensagem de um erro, numa linha e sem conteúdo do feed (o resumo é público).
+
+    FeedError já traz uma mensagem construída pelo coletor: não se repete o tipo.
+    """
+    msg = (str(e).strip().splitlines() or [""])[0]
+    txt = msg if isinstance(e, FeedError) else f"{type(e).__name__}: {msg}"
+    return md(txt[:300])
+
+
 def iso(dt):
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -337,7 +347,7 @@ def refresh_static(now, t0, waited=False):
     try:
         raw, rows, excerpt, sites = fetch_parse_infra(t0 + C.INFRA_DEADLINE_S)
     except FeedError as e:
-        say(f"> ⚠️ Inventário não atualizado: {str(e)[:300]}. Mantém-se o anterior; "
+        say(f"> ⚠️ Inventário não atualizado: {erro_curto(e)}. Mantém-se o anterior; "
             "nova tentativa na execução seguinte.")
         return None
 
@@ -460,8 +470,9 @@ def main():
         if not SAMPLE_WRITTEN:  # nunca uma segunda amostra para a mesma execução
             record_sample(now, err=f"erro interno: {type(e).__name__}: {e}"[:300],
                           secs=round(time.time() - t0, 1))
-        say(f"> ❌ Erro interno: `{type(e).__name__}: {e}`")
-        say("```\n" + traceback.format_exc()[-3000:] + "\n```")
+        say(f"> ❌ Erro interno: `{erro_curto(e)}`")
+        if not C.PUBLIC_SUMMARY:
+            say("```\n" + traceback.format_exc()[-3000:] + "\n```")
         raise
 
 
@@ -479,7 +490,7 @@ def process(now, t0, last):
         res = fetch_parse_status(cond)
     except FeedError as e:
         record_sample(now, err=str(e)[:300], secs=round(time.time() - t0, 1))
-        say(f"> ❌ Feed dinâmico indisponível ou inválido: {e}")
+        say(f"> ❌ Feed dinâmico indisponível ou inválido: {erro_curto(e)}")
         return 0
     if res["retries"]:
         say(f"> ⚠️ Primeira resposta inválida; recuperado à tentativa {res['retries'] + 1}.")
@@ -503,7 +514,7 @@ def process(now, t0, last):
                     res = res2
                     say("- Nova versão obtida após a espera.")
             except FeedError as e:
-                say(f"> ⚠️ Nova tentativa falhou: {e}")
+                say(f"> ⚠️ Nova tentativa falhou: {erro_curto(e)}")
 
     raw, http, hdr, start, pub = res["raw"], res["http"], res["hdr"], res["start"], res["pub"]
     age = round((start - pub).total_seconds(), 1) if pub else ""
@@ -556,7 +567,7 @@ def process(now, t0, last):
         record_sample(now, n_points=len(cur), err="feed vazio ou parcial",
                       secs=round(time.time() - t0, 1), **base)
         say(f"> ❌ Feed vazio ou parcial ({len(cur)} pontos). Tratado como falha (sem dados).")
-        if not cur:
+        if not cur and not C.PUBLIC_SUMMARY:
             say("```xml\n" + raw[:2500].decode("utf-8", "replace") + "\n```")
         return 0
 
@@ -597,11 +608,12 @@ def process(now, t0, last):
             say(f"- `{k}`: {', '.join(v)}")
         say("</details>\n")
     say(f"- Tarifários: **{n_tar}** {'alterações registadas' if had_tar else 'pontos no registo de base'}")
-    say("\n### Estados no feed")
-    say("| Estado | Pontos |")
-    say("|---|---|")
-    for st, n in Counter(cur.values()).most_common():
-        say(f"| `{st or '(vazio)'}` | {n} |")
+    if not C.PUBLIC_SUMMARY:
+        say("\n### Estados no feed")
+        say("| Estado | Pontos |")
+        say("|---|---|")
+        for st, n in Counter(cur.values()).most_common():
+            say(f"| `{st or '(vazio)'}` | {n} |")
 
     # O estado já está gravado: um problema no inventário nunca faz falhar a execução.
     try:
@@ -622,7 +634,7 @@ def process(now, t0, last):
                 say("\n<details><summary>Excerto XML — inventário</summary>\n\n```xml\n"
                     f"{sexcerpt}\n```\n</details>")
     except Exception as e:  # noqa: BLE001
-        say(f"> ⚠️ Inventário não atualizado ({type(e).__name__}: {str(e)[:300]}). Mantém-se o anterior.")
+        say(f"> ⚠️ Inventário não atualizado ({erro_curto(e)}). Mantém-se o anterior.")
     return 0
 
 
