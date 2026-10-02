@@ -17,6 +17,7 @@ import pandas as pd
 
 from . import config as C
 
+# Só estas pastas são arquivadas; ficheiros da raiz do estado (ex.: raw_infra_semana.txt) ficam.
 KINDS = {"events": "csv", "samples": "csv", "static_events": "csv", "tariffs": "csv", "raw": "copy", "raw_infra": "copy"}
 MANIFEST = C.STATE_DIR / ".archive_manifest.json"
 MANIFEST_HASH = C.STATE_DIR / ".static_hash_pending.txt"

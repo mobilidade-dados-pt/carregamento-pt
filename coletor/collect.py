@@ -326,6 +326,9 @@ def record_sample(now, **kw):
 
 
 # ---------------------------------------------------------------- estático
+RAW_INFRA_MARCADOR = "raw_infra_semana.txt"  # na raiz do estado: o arquivo diário não o toca
+
+
 def refresh_static(now, t0, waited=False):
     """Atualiza o inventário se tiver mais de STATIC_REFRESH_H horas.
 
@@ -383,13 +386,22 @@ def refresh_static(now, t0, waited=False):
     for lvl, fr in (("local", fr_s), ("ponto", fr_p)):
         for k, v in fr.items():
             say(f"| {lvl} | `{k}` | {v} |")
-    # cópia bruta semanal do inventário (reprocessamento de campos novos no futuro)
+    # cópia bruta semanal do inventário (reprocessamento de campos novos no futuro).
+    # A semana ISO da última cópia fica em RAW_INFRA_MARCADOR: o arquivo diário tira as cópias
+    # do estado, por isso a pasta raw_infra/ não serve para saber se a semana já tem cópia.
     day = lisbon_date(now)
     wk = now.astimezone(C.TZ).isocalendar()
-    rawdir = C.STATE_DIR / "raw_infra"
-    if not any(rawdir.glob(f"*W{wk.week:02d}*")) if rawdir.exists() else True:
-        with atomic_write(rawdir / f"{day}.W{wk.week:02d}.infra.xml.gz", "gzb") as f:
-            f.write(raw)
+    semana = f"{wk.year}-W{wk.week:02d}"
+    marcador = C.STATE_DIR / RAW_INFRA_MARCADOR
+    ultima = marcador.read_text(encoding="utf-8").strip() if marcador.exists() else ""
+    if ultima != semana:
+        rawdir = C.STATE_DIR / "raw_infra"
+        # Ainda sem cópia desta semana no estado (verificação anterior ao marcador, para a transição).
+        if not any(rawdir.glob(f"*W{wk.week:02d}*")) if rawdir.exists() else True:
+            with atomic_write(rawdir / f"{day}.W{wk.week:02d}.infra.xml.gz", "gzb") as f:
+                f.write(raw)
+        with atomic_write(marcador, "w") as f:
+            f.write(semana + "\n")
     save_json(meta_p, {"ts_utc": iso(now), "n_points": len(rows),
                        "n_sites": len({r["site_id"] for r in rows})})
     return rows, excerpt

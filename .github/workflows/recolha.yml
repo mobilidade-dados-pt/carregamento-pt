@@ -17,8 +17,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 12
     env:
-      # Estado e arquivo vivem no repositório PRIVADO (variável DATA_REPO + segredo DATA_TOKEN).
-      DATA_URL: https://x-access-token:${{ secrets.DATA_TOKEN }}@github.com/${{ vars.DATA_REPO }}.git
+      # Estado e arquivo vivem no repositório PRIVADO (segredos DATA_REPO e DATA_TOKEN, passados só
+      # aos passos que os usam; o endereço é montado dentro de cada script e nunca fica no env).
       STATE_DIR: ${{ github.workspace }}/state
       DATA_DIR: ${{ github.workspace }}/data
     steps:
@@ -41,7 +41,12 @@ jobs:
           git config --global user.email "coletor@users.noreply.github.com"
 
       - name: Obter estado
+        env:
+          DATA_REPO: ${{ secrets.DATA_REPO }}
+          DATA_TOKEN: ${{ secrets.DATA_TOKEN }}
         run: |
+          [ -n "$DATA_REPO" ] || { echo "::error::Segredo DATA_REPO em falta. Run interrompido para não perder o estado."; exit 1; }
+          DATA_URL="https://x-access-token:${DATA_TOKEN}@github.com/${DATA_REPO}.git"
           # 0 = branch existe · 2 = branch não existe · outro = erro de acesso (falha o run, nunca recomeça do zero)
           set +e; git ls-remote --exit-code --heads "$DATA_URL" state >/dev/null; rc=$?; set -e
           if [ "$rc" = 0 ]; then
@@ -52,7 +57,7 @@ jobs:
             mkdir state && git -C state init -q -b state
             touch state/.novo
           else
-            echo "::error::Sem acesso ao repositório privado (código $rc). Confirmar DATA_TOKEN e DATA_REPO. Run interrompido para não perder o estado."
+            echo "::error::Sem acesso ao repositório privado (código $rc). Confirmar os segredos DATA_TOKEN e DATA_REPO. Run interrompido para não perder o estado."
             exit 1
           fi
           git -C state remote remove origin 2>/dev/null || true
@@ -63,7 +68,11 @@ jobs:
 
       - name: Dias por arquivar
         id: arq
+        env:
+          DATA_REPO: ${{ secrets.DATA_REPO }}
+          DATA_TOKEN: ${{ secrets.DATA_TOKEN }}
         run: |
+          DATA_URL="https://x-access-token:${DATA_TOKEN}@github.com/${DATA_REPO}.git"
           python -m coletor.archive pending
           set +e; git ls-remote --exit-code --heads "$DATA_URL" data >/dev/null; rc=$?; set -e
           if [ "$rc" = 0 ]; then
@@ -78,7 +87,11 @@ jobs:
 
       - name: Exportar para branch data
         if: steps.arq.outputs.pending != '0' && steps.arq.outputs.data_ok == '1'
+        env:
+          DATA_REPO: ${{ secrets.DATA_REPO }}
+          DATA_TOKEN: ${{ secrets.DATA_TOKEN }}
         run: |
+          DATA_URL="https://x-access-token:${DATA_TOKEN}@github.com/${DATA_REPO}.git"
           git clone -q --depth 1 --filter=blob:none --sparse --branch data "$DATA_URL" data
           python -m coletor.archive export
           cd data
@@ -93,7 +106,11 @@ jobs:
       - name: Guardar estado
         # Não corre se o job for cancelado (incluindo por limite de tempo): mantém-se o estado anterior.
         if: ${{ !cancelled() }}
+        env:
+          DATA_REPO: ${{ secrets.DATA_REPO }}
+          DATA_TOKEN: ${{ secrets.DATA_TOKEN }}
         run: |
+          DATA_URL="https://x-access-token:${DATA_TOKEN}@github.com/${DATA_REPO}.git"
           [ -d state ] || { echo "Sem estado para guardar."; exit 0; }
           # Proteção: um estado novo nunca substitui um estado que já exista no privado.
           if [ -f state/.novo ]; then
@@ -105,4 +122,14 @@ jobs:
           git checkout -q --orphan snap
           git add -A
           git commit -qm "estado $(date -u +%FT%TZ)"
-          git push -qf origin snap:state
+          # Até 3 novas tentativas do push (esperas de 10, 20 e 40 s); o passo só falha depois da última.
+          ok=0
+          for espera in 0 10 20 40; do
+            if [ "$espera" != 0 ]; then
+              echo "::warning::Push do estado falhou; nova tentativa daqui a ${espera} s."
+              sleep "$espera"
+            fi
+            git push -qf origin snap:state && { ok=1; break; }
+          done
+          if [ "$ok" = 0 ]; then echo "::error::Push do estado falhou após 4 tentativas."; exit 1; fi
+          echo "Estado guardado."
