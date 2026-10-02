@@ -15,7 +15,7 @@ Este repositório recolhe, a cada 5 minutos, o estado de todas as tomadas públi
 Dados:
 
 - Este repositório contém **apenas o código** da recolha.
-- O estado corrente e o arquivo diário (Parquet) são gravados num **repositório privado**, indicado pela variável `DATA_REPO` e acedido com o segredo `DATA_TOKEN`.
+- O estado corrente e o arquivo diário (Parquet) são gravados num **repositório privado**, indicado pelo segredo `DATA_REPO` e acedido com o segredo `DATA_TOKEN`.
 - O Summary de cada run mostra apenas indicadores técnicos.
 
 Fonte dos dados: Ponto de Acesso Nacional (NAP Portugal, IMT) — dados da rede MOBI.E, livre acesso.
