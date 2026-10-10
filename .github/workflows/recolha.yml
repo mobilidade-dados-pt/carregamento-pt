@@ -133,3 +133,14 @@ jobs:
           done
           if [ "$ok" = 0 ]; then echo "::error::Push do estado falhou após 4 tentativas."; exit 1; fi
           echo "Estado guardado."
+
+      - name: Ping healthchecks
+        # Só em execução bem sucedida. Endereço no segredo, só no env deste passo, nunca impresso.
+        # Uma falha do ping só gera aviso: se os pings faltarem, o próprio healthchecks.io alerta.
+        if: success()
+        env:
+          HC_PING_URL: ${{ secrets.HC_PING_URL_RECOLHA }}
+        run: |
+          [ -n "$HC_PING_URL" ] || { echo "::warning::Segredo HC_PING_URL_RECOLHA em falta: ping não enviado."; exit 0; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 --retry 3 "$HC_PING_URL" 2>/dev/null) || true
+          if [ "$code" = 200 ]; then echo "Ping healthchecks: 200"; else echo "::warning::Ping healthchecks falhou (código ${code:-000})."; fi
