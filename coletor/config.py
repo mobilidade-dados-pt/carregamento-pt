@@ -14,7 +14,9 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
 
 # Recolhas mais próximas do que isto são ignoradas (evita duplicados
 # quando o cron-job.org e o schedule do GitHub disparam em simultâneo).
-MIN_INTERVAL_S = 150
+# Um disparo duplicado que passe o intervalo é travado pela deteção de
+# versão repetida (ETag + publicationTime, collect.py).
+MIN_INTERVAL_S = 90
 
 # Periodicidade de atualização do inventário estático.
 STATIC_REFRESH_H = 6

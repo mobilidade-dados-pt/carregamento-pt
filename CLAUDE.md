@@ -25,6 +25,7 @@ Recolhe, a cada 5 minutos, o estado e o inventário dos pontos de carregamento p
 - Falha do inventário (truncado, sem resposta ou erro): **mantém-se o anterior**, com aviso no resumo; a execução não falha nem grava uma segunda amostra; a execução seguinte volta a tentar.
 - Orçamento de tempo (job de 12 min): o inventário só é atualizado se a execução não esperou pela versão seguinte e tem menos de 180 s; 1 pedido por tentativa, até 2 tentativas, nenhuma começa depois de 420 s.
 - "Guardar estado" corre com `!cancelled()`: um job cancelado (incluindo por limite de tempo) não publica estado. O push do estado tem até 3 novas tentativas (10, 20 e 40 s); o passo só falha depois da última.
+- Ping ao healthchecks.io como último passo do job, só em sucesso (`if: success()`); o segredo `HC_PING_URL_RECOLHA` entra só no `env` desse passo e nunca é impresso; uma falha do ping é aviso, não erro.
 - Cópia bruta do inventário (`raw_infra`): uma por semana ISO (hora de Lisboa). A semana da última cópia fica em `raw_infra_semana.txt`, na raiz do estado; o arquivo diário não o arquiva nem apaga.
 - Gravações atómicas: temporário em `STATE_DIR/.tmp/` + `os.replace`; os `.csv.gz` diários são copiados com o novo membro antes de substituir. Nunca escrever diretamente nos ficheiros do estado.
 - Testes: `python -m unittest discover tests -v` (amostras sintéticas em `tests/amostras/`, sem dados reais).

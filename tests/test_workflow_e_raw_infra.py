@@ -49,19 +49,21 @@ def blocos_env(texto):
 
 
 def passos(texto):
-    """Passos do job: {nome: {"env": {...}, "run": "..."}} (leitura por indentação, sem PyYAML)."""
+    """Passos do job: {nome: {"env": {...}, "run": "...", "if": ...}} (leitura por indentação, sem PyYAML)."""
     linhas = texto.splitlines()
     inicios = [i for i, l in enumerate(linhas) if re.match(r"^      - ", l)]
     out = {}
     for a, b in zip(inicios, inicios[1:] + [len(linhas)]):
         bloco = [l.replace("      - ", "        ", 1) if j == 0 else l
                  for j, l in enumerate(linhas[a:b])]
-        nome, env, run = None, {}, []
+        nome, env, run, cond = None, {}, [], None
         i = 0
         while i < len(bloco):
             l = bloco[i]
             if indent(l) == 8 and l.strip().startswith("name:"):
                 nome = l.split(":", 1)[1].strip()
+            elif indent(l) == 8 and l.strip().startswith("if:"):
+                cond = l.split(":", 1)[1].strip()
             elif indent(l) == 8 and l.strip() == "env:":
                 i += 1
                 while i < len(bloco) and (not bloco[i].strip() or indent(bloco[i]) > 8):
@@ -78,7 +80,7 @@ def passos(texto):
                 continue
             i += 1
         if nome:
-            out[nome] = {"env": env, "run": "\n".join(run).rstrip() + "\n"}
+            out[nome] = {"env": env, "run": "\n".join(run).rstrip() + "\n", "if": cond}
     return out
 
 
@@ -185,6 +187,78 @@ class TestPushEstado(unittest.TestCase):
         self.assertEqual((len(pushes), esperas), (1, []))
 
 
+# ---------------------------------------------------------------- (d) ping ao healthchecks.io
+CURL_STUB = """#!/usr/bin/env bash
+echo "$*" >> "$REG/curl.log"
+cat "$REG/codigo"
+exit "$(cat "$REG/rc")"
+"""
+HC_URL = "https://hc.example.invalid/ping/ficticio"
+
+
+class TestPingHealthchecks(unittest.TestCase):
+    PASSO = "Ping healthchecks"
+
+    def test_ultimo_passo_so_em_sucesso_segredo_so_no_seu_env(self):
+        self.assertEqual(list(PASSOS)[-1], self.PASSO)
+        self.assertEqual(PASSOS[self.PASSO]["if"], "success()")
+        self.assertEqual(PASSOS[self.PASSO]["env"], {"HC_PING_URL": "${{ secrets.HC_PING_URL_RECOLHA }}"})
+        for n, p in PASSOS.items():
+            if n != self.PASSO:
+                self.assertNotIn("HC_PING_URL", p["env"], n)
+        self.assertEqual(sum("HC_PING_URL" in b for b in blocos_env(TEXTO)), 1)
+        ecos = re.findall(r'echo\s+"([^"]*)"', PASSOS[self.PASSO]["run"])  # o endereço nunca é impresso
+        self.assertTrue(ecos)
+        for texto in ecos:
+            self.assertNotIn("$HC_PING_URL", texto)
+            self.assertNotIn("${HC_PING_URL", texto)
+
+    def pingar(self, codigo, rc, url=HC_URL):
+        """Corre o passo com um curl fictício que devolve `codigo` e sai com `rc`."""
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "bin").mkdir()
+            (d / "bin" / "curl").write_text(CURL_STUB)
+            (d / "bin" / "curl").chmod(0o755)
+            (d / "codigo").write_text(codigo)
+            (d / "rc").write_text(str(rc))
+            r = correr_passo(self.PASSO, d, {"PATH": f"{d / 'bin'}:{os.environ['PATH']}",
+                                             "REG": str(d), "HC_PING_URL": url})
+            chamadas = (d / "curl.log").read_text().splitlines() if (d / "curl.log").exists() else []
+        out = r.stdout + r.stderr
+        self.assertNotIn(HC_URL, out)
+        self.assertNotIn("hc.example.invalid", out)
+        return r, chamadas, out
+
+    def test_200(self):
+        r, chamadas, out = self.pingar("200", 0)
+        self.assertEqual(r.returncode, 0, out)
+        self.assertIn("Ping healthchecks: 200", r.stdout)
+        self.assertNotIn("::warning::", out)
+        self.assertEqual(len(chamadas), 1)
+        self.assertIn(HC_URL, chamadas[0])
+        self.assertIn("-m 10 --retry 3", chamadas[0])
+
+    def test_500_so_aviso(self):
+        r, chamadas, out = self.pingar("500", 0)
+        self.assertEqual(r.returncode, 0, out)
+        self.assertIn("::warning::Ping healthchecks falhou (código 500).", out)
+        self.assertNotIn("Ping healthchecks: 200", out)
+        self.assertEqual(len(chamadas), 1)
+
+    def test_erro_do_curl_so_aviso(self):
+        r, chamadas, out = self.pingar("", 7)
+        self.assertEqual(r.returncode, 0, out)
+        self.assertIn("::warning::Ping healthchecks falhou (código 000).", out)
+        self.assertEqual(len(chamadas), 1)
+
+    def test_segredo_vazio_sem_curl(self):
+        r, chamadas, out = self.pingar("200", 0, url="")
+        self.assertEqual(r.returncode, 0, out)
+        self.assertIn("::warning::Segredo HC_PING_URL_RECOLHA em falta", out)
+        self.assertEqual(chamadas, [])
+
+
 # ---------------------------------------------------------------- (b) raw_infra semanal
 def dia(semana, dia_semana, hora=10):
     return datetime.combine(date.fromisocalendar(2026, semana, dia_semana), time(hora), timezone.utc)
@@ -265,7 +339,7 @@ class TestRawInfraSemanal(Base):
         subprocess.run(["git", "init", "-q", "--bare", str(remoto)], check=True)
         gitconfig = base / "gitconfig"
         gitconfig.write_text(f'[user]\n\tname = teste\n\temail = teste@example.invalid\n'
-                             f'[url "{remoto}"]\n\tinsteadOf = {URL}\n')
+                             f'[url "{remoto.as_posix()}"]\n\tinsteadOf = {URL}\n')  # sem "\" (Windows)
         env = {"GIT_CONFIG_GLOBAL": str(gitconfig), "GIT_CONFIG_NOSYSTEM": "1"}
 
         r = correr_passo("Obter estado", base, env)  # branch state inexistente: estado novo

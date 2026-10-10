@@ -6,9 +6,11 @@ e todos os ficheiros do estado legíveis.
 
 Executar: python -m unittest discover tests -v
 """
+import contextlib
 import csv
 import gzip
 import io
+import sys
 import tempfile
 import types
 import unittest
@@ -21,6 +23,8 @@ import pandas as pd
 from coletor import archive
 from coletor import collect
 from coletor import config as C
+
+MIN_INTERVAL_REAL = C.MIN_INTERVAL_S  # valor do config, capturado antes de Base o pôr a 0
 
 AMOSTRAS = Path(__file__).parent / "amostras"
 INFRA = (AMOSTRAS / "infra.xml").read_bytes()
@@ -92,6 +96,10 @@ class Base(unittest.TestCase):
             mock.patch.object(collect, "SUMMARY", []),
             mock.patch.object(collect, "datetime", Agora),
         ]
+        if sys.platform == "win32":
+            # No Windows, os.fsync num descritor aberto só para leitura dá EBADF; no Linux
+            # (onde o coletor corre) não. Só nos testes: o código de produção fica igual.
+            self.patches.append(mock.patch.object(collect.os, "fsync", lambda fd: None))
         Agora.atual = datetime.now(timezone.utc).replace(microsecond=0)
         for p in self.patches:
             p.start()
@@ -331,6 +339,47 @@ class TestResumoPublico(Base):
         self.assertNotIn("```", resumo)
         for trecho in ("<?xml", "<d2:", "<!--", "datex2.eu"):  # nada do conteúdo da resposta
             self.assertNotIn(trecho, resumo)
+
+
+class TestIntervaloMinimo(Base):
+    """Intervalo mínimo real entre recolhas (Base põe-no a 0; aqui repõe-se o valor do config)."""
+
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(C, "MIN_INTERVAL_S", MIN_INTERVAL_REAL)
+        p.start()
+        self.patches.append(p)
+
+    def executar_apos(self, segundos, feed):
+        """collect.main() `segundos` depois da primeira execução (sem os 5 min de correr())."""
+        Agora.atual = self.t_primeira + timedelta(seconds=segundos)
+        collect.SAMPLE_WRITTEN = False
+        collect.SUMMARY.clear()
+        saida = io.StringIO()
+        with mock.patch.object(collect, "fetch", feed), contextlib.redirect_stdout(saida):
+            rc = collect.main()
+        self.assertEqual(rc, 0)
+        return saida.getvalue()
+
+    def test_valor_em_vigor(self):
+        self.assertEqual(MIN_INTERVAL_REAL, 90)
+
+    def test_60_s_ignorada_100_s_recolhe(self):
+        self.correr(Feed(self.relogio, status=[status_xml(self.pub0)], infra=[INFRA]))
+        self.t_primeira = Agora.atual
+
+        feed = Feed(self.relogio, status=[status_xml(self.pub0 + timedelta(minutes=5))])
+        saida = self.executar_apos(60, feed)
+        self.assertIn("ignorada", saida)
+        self.assertEqual(feed.pedidos["status"], 0, "o feed não chega a ser pedido")
+        self.verificar_estado(1)
+
+        feed = Feed(self.relogio, status=[status_xml(self.pub0 + timedelta(minutes=5))])
+        saida = self.executar_apos(100, feed)
+        self.assertNotIn("ignorada", saida)
+        self.assertEqual(feed.pedidos["status"], 1)
+        am = self.verificar_estado(2)
+        self.assertEqual(am[-1]["version"], "nova")
 
     def test_modo_privado_mantem_detalhe(self):
         with mock.patch.object(C, "PUBLIC_SUMMARY", False):

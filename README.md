@@ -74,6 +74,7 @@ Resposta esperada: **204**.
 
 ## Notas
 
-- **Recolhas duplicadas:** se o cron-job.org e o schedule do GitHub dispararem quase em simultâneo, a segunda recolha é ignorada (intervalo mínimo de 150 s).
+- **Recolhas duplicadas:** se o cron-job.org e o schedule do GitHub dispararem quase em simultâneo, a segunda recolha é ignorada (intervalo mínimo de 90 s). Um disparo duplicado que passe o intervalo é travado pela deteção de versão repetida (ETag e `publicationTime`): não gera observação nova.
+- **Monitorização externa:** no fim de cada execução bem sucedida é feito um ping ao healthchecks.io, com o endereço guardado no segredo `HC_PING_URL_RECOLHA`. Se os pings faltarem, o healthchecks.io alerta. Sem o segredo, a execução só emite um aviso.
 - **Falhas do feed:** um feed indisponível, vazio ou com menos de 50% das tomadas conhecidas é registado como falha. Esse período conta como "sem dados" no cálculo.
 - **Inatividade:** o GitHub desativa o schedule em repositórios sem atividade durante 60 dias. O disparo via cron-job.org não é afetado.
