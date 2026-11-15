@@ -60,3 +60,11 @@ PUBLIC_SUMMARY = os.environ.get("PUBLIC_SUMMARY", "1") == "1"
 USER_AGENT = "disponibilidade-carregamento-pt/1.0 (projeto independente; fonte NAP/MOBI.E)"
 HTTP_TIMEOUT = (15, 120)
 HTTP_RETRIES = 3
+HTTP_CHUNK = 64 * 1024  # a leitura da resposta verifica o prazo a cada bloco
+
+# Prazo total de cada descarga do feed de estado (todas as tentativas e pausas incluídas).
+# Nenhuma tentativa começa depois do prazo e a leitura de uma resposta lenta é interrompida.
+# A segunda descarga (depois da espera pela versão seguinte) acaba sempre antes de
+# FEED_LIMITE_EXECUCAO_S desde o início da execução, para o job (12 min) guardar o estado.
+FEED_DEADLINE_S = 240
+FEED_LIMITE_EXECUCAO_S = 540

@@ -70,7 +70,7 @@ class Feed:
         self.infra = list(infra)
         self.pedidos = {"status": 0, "infra": 0}
 
-    def __call__(self, url, extra_headers=None, retries=None):
+    def __call__(self, url, extra_headers=None, retries=None, deadline=None):
         kind = "infra" if url == C.INFRA_URL else "status"
         self.pedidos[kind] += 1
         item = (self.infra if kind == "infra" else self.status).pop(0)

@@ -2,15 +2,16 @@
 
 Projeto independente. Fonte: NAP/MOBI.E (DATEX II).
 
-Este repositório recolhe, a cada 5 minutos, o estado de todas as tomadas públicas da rede nacional e guarda o histórico para cálculo de disponibilidade e ocupação. O dashboard será acrescentado numa fase seguinte.
+Este repositório recolhe, a cada 5 minutos, o estado de todas as tomadas públicas da rede nacional e guarda o histórico para cálculo de disponibilidade e ocupação. O dashboard já existe e usa estes dados.
 
 ## Como funciona
 
 | Componente | Função |
 |---|---|
 | `coletor/collect.py` | Descarrega o feed de estado. Regista apenas **mudanças de estado** (eventos) e um registo de cada amostra, para medir a cobertura e aplicar o teto de 10 min. Atualiza o inventário estático a cada 6h. |
-| `coletor/archive.py` | Depois das 00:10 (Lisboa), converte o dia anterior para Parquet e move-o para o branch `data`. |
-| `.github/workflows/recolha.yml` | Corre o coletor. É disparado pelo cron-job.org, com o schedule do GitHub como redundância. |
+| `coletor/archive.py` | Depois das 00:10 (Lisboa), converte o dia anterior para Parquet e move-o para o branch `data`. Nunca substitui um ficheiro já arquivado. |
+| `.github/workflows/recolha.yml` | Corre o coletor. Só tem `workflow_dispatch`: é disparado pelos disparadores externos, com a entrada `origem` (por omissão `externo`). |
+| `.github/workflows/reserva.yml` | Único workflow agendado (a cada 5 min). Se a última recolha tiver mais de 360 s, dispara-a com origem `reserva`. A entrada `forcar` dispara a recolha num teste manual. |
 
 Dados:
 
@@ -31,12 +32,14 @@ Fonte dos dados: Ponto de Acesso Nacional (NAP Portugal, IMT) — dados da rede 
 
 ### 2. Permissões
 
-**Settings → Actions → General → Workflow permissions →** selecionar **Read and write permissions → Save**.
+**Settings → Actions → General → Workflow permissions →** selecionar **Read repository contents and packages permissions** (só leitura) **→ Save**.
+
+Cada workflow declara as suas permissões: `contents: read` na recolha e `actions: write` na reserva (só para disparar a recolha). Os dados são gravados com o segredo `DATA_TOKEN`, não com o token do workflow.
 
 ### 3. Primeiro run (manual)
 
 1. Separador **Actions**. Se pedir, clicar em **I understand my workflows, go ahead and enable them**.
-2. Abrir **Recolha → Run workflow → Run workflow**.
+2. Abrir **Recolha → Run workflow**, deixar `origem` com o valor por omissão e clicar em **Run workflow**.
 3. Quando terminar (cerca de 1–2 min), abrir o run e ler o **Summary**. Deve mostrar:
    - nº de pontos e tabela de estados;
    - ranking de operadores;
@@ -63,9 +66,9 @@ Criar um cronjob com:
 | Schedule | Every 5 minutes |
 | Request method (Advanced) | POST |
 | Headers | `Accept: application/vnd.github+json`<br>`Authorization: Bearer <token>`<br>`X-GitHub-Api-Version: 2022-11-28` |
-| Request body | `{"ref":"main"}` |
+| Request body | `{"ref":"main","inputs":{"origem":"cron-job.org"}}` |
 
-Resposta esperada: **204**.
+Resposta esperada: **204**. Sem `inputs`, a recolha corre com origem `externo`. Uma entrada que o workflow não tenha é recusada (422): só acrescentar `origem` depois de o `recolha.yml` a ter.
 
 ## Verificação
 
@@ -74,7 +77,9 @@ Resposta esperada: **204**.
 
 ## Notas
 
-- **Recolhas duplicadas:** se o cron-job.org e o schedule do GitHub dispararem quase em simultâneo, a segunda recolha é ignorada (intervalo mínimo de 90 s). Um disparo duplicado que passe o intervalo é travado pela deteção de versão repetida (ETag e `publicationTime`): não gera observação nova.
+- **Recolhas duplicadas:** se dois disparos chegarem quase em simultâneo, a segunda recolha é ignorada (intervalo mínimo de 90 s) e não grava o estado nem arquiva. Um disparo duplicado que passe o intervalo é travado pela deteção de versão repetida (ETag e `publicationTime`): não gera observação nova.
 - **Monitorização externa:** no fim de cada execução bem sucedida é feito um ping ao healthchecks.io, com o endereço guardado no segredo `HC_PING_URL_RECOLHA`. Se os pings faltarem, o healthchecks.io alerta. Sem o segredo, a execução só emite um aviso.
 - **Falhas do feed:** um feed indisponível, vazio ou com menos de 50% das tomadas conhecidas é registado como falha. Esse período conta como "sem dados" no cálculo.
-- **Inatividade:** o GitHub desativa o schedule em repositórios sem atividade durante 60 dias. O disparo via cron-job.org não é afetado.
+- **Inatividade:** num repositório público, o GitHub desativa os workflows agendados após 60 dias sem atividade. Só o `reserva.yml` é agendado. A recolha principal só tem `workflow_dispatch`, não é desativada e não depende da reserva. Se a reserva for desativada, reativar em **Actions → Reserva → Enable workflow**.
+- **Ficheiros tardios:** se um dia já arquivado voltar a aparecer no estado com outro conteúdo, o ficheiro vai para `_tardios/<ano>/<tipo>/` no branch `data`, com `.tardio-N` no nome, e o resumo da execução mostra um aviso. As pastas `<ano>/<tipo>/` nunca são alteradas. Com o mesmo conteúdo, nada é gravado.
+- **Prazo do feed:** cada descarga do feed de estado tem um prazo total de 240 s (todas as tentativas incluídas).

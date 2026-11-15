@@ -1,0 +1,52 @@
+name: Reserva
+
+# Único workflow agendado. Se a última recolha foi criada há mais de 360 s (os disparadores
+# externos falharam), dispara o recolha.yml com origem "reserva"; caso contrário não faz nada.
+# Pode ser desativado pelo GitHub após 60 dias sem commits: a recolha não depende dele.
+on:
+  schedule:
+    - cron: "2-59/5 * * * *"  # minutos 2, 7, 12, ... (ciclo do feed)
+  workflow_dispatch:
+    inputs:
+      forcar:
+        description: "Disparar a recolha mesmo com uma execução recente"
+        type: boolean
+        default: false
+
+concurrency:
+  group: reserva
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+
+jobs:
+  reserva:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Disparar a recolha se estiver parada
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          FORCAR: ${{ inputs.forcar || false }}
+        run: |
+          if [ "$FORCAR" = "true" ]; then
+            echo "Disparo forçado."
+          else
+            set +e; criada=$(gh run list --workflow recolha.yml --limit 1 --json createdAt -q '.[0].createdAt // ""'); rc=$?; set -e
+            t=""
+            [ "$rc" = 0 ] && [ -n "$criada" ] && t=$(date -u -d "$criada" +%s 2>/dev/null || true)
+            if [ "$rc" != 0 ]; then
+              # Os dados não se recuperam: na dúvida dispara (um disparo a mais é travado pelo intervalo de 90 s).
+              echo "::warning::Leitura da última recolha falhou (código $rc): disparo por precaução."
+            elif [ -z "$t" ]; then
+              echo "::warning::Nenhuma recolha anterior encontrada: disparo por precaução."
+            else
+              idade=$(( $(date -u +%s) - t ))
+              if [ "$idade" -le 360 ]; then echo "Recolha recente (${idade} s): nada a fazer."; exit 0; fi
+              echo "::warning::Última recolha criada há ${idade} s (mais de 360 s): a disparar a recolha."
+            fi
+          fi
+          gh workflow run recolha.yml --ref main -f origem=reserva
+          echo "Recolha disparada com origem reserva."

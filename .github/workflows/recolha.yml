@@ -1,9 +1,16 @@
 name: Recolha
+run-name: Recolha · ${{ inputs.origem || 'externo' }}
 
+# Só workflow_dispatch: um workflow sem schedule não é desativado por inatividade.
+# Disparado pelos disparadores externos a cada 5 min e, se estes falharem, pelo reserva.yml.
 on:
-  workflow_dispatch:          # disparado pelo cron-job.org a cada 5 min
-  schedule:
-    - cron: "2-59/5 * * * *"  # redundância, alinhada com o ciclo do feed (minutos 2, 7, 12, ...)
+  workflow_dispatch:
+    inputs:
+      origem:
+        description: "Quem disparou a recolha"
+        type: string
+        required: false
+        default: externo
 
 concurrency:
   group: recolha
@@ -18,17 +25,18 @@ jobs:
     timeout-minutes: 12
     env:
       # Estado e arquivo vivem no repositório PRIVADO (segredos DATA_REPO e DATA_TOKEN, passados só
-      # aos passos que os usam; o endereço é montado dentro de cada script e nunca fica no env).
+      # aos passos que os usam; o endereço é montado dentro de cada script e nunca fica no env
+      # nem na configuração do git).
       STATE_DIR: ${{ github.workspace }}/state
       DATA_DIR: ${{ github.workspace }}/data
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
           # Sem isto, o checkout grava o token do repositório público na configuração do git
           # e os comandos seguintes usam-no no lugar do DATA_TOKEN (sem acesso ao privado).
           persist-credentials: false
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
           python-version: "3.12"
           cache: pip
@@ -61,14 +69,22 @@ jobs:
             echo "::error::Sem acesso ao repositório privado (código $rc). Confirmar os segredos DATA_TOKEN e DATA_REPO. Run interrompido para não perder o estado."
             exit 1
           fi
+          # O endereço com o token não fica guardado: os passos que gravam fazem o push para o
+          # endereço montado no próprio passo.
           git -C state remote remove origin 2>/dev/null || true
-          git -C state remote add origin "$DATA_URL"
 
       - name: Recolher
-        run: python -m coletor.collect
+        id: recolher
+        run: |
+          # Verificação (sem mostrar nada): a configuração do git do estado não pode ter o token.
+          token=0
+          if [ -f state/.git/config ] && grep -qE 'x-access-token|github_pat_|ghp_|ghs_' state/.git/config; then token=1; fi
+          python -m coletor.collect
+          if [ "$token" = 1 ]; then echo "::error::Token encontrado na configuração do git do estado."; exit 1; fi
 
       - name: Dias por arquivar
         id: arq
+        if: steps.recolher.outputs.ignorada != '1'
         env:
           DATA_REPO: ${{ secrets.DATA_REPO }}
           DATA_TOKEN: ${{ secrets.DATA_TOKEN }}
@@ -87,26 +103,30 @@ jobs:
           fi
 
       - name: Exportar para branch data
-        if: steps.arq.outputs.pending != '0' && steps.arq.outputs.data_ok == '1'
+        if: steps.recolher.outputs.ignorada != '1' && steps.arq.outputs.pending != '0' && steps.arq.outputs.data_ok == '1'
         env:
           DATA_REPO: ${{ secrets.DATA_REPO }}
           DATA_TOKEN: ${{ secrets.DATA_TOKEN }}
         run: |
           DATA_URL="https://x-access-token:${DATA_TOKEN}@github.com/${DATA_REPO}.git"
           git clone -q --depth 1 --filter=blob:none --sparse --branch data "$DATA_URL" data
+          # O clone parcial usa o remoto durante o passo; no fim (sucesso ou erro) o endereço sai da configuração.
+          dir_data="$PWD/data"
+          trap 'git -C "$dir_data" remote remove origin 2>/dev/null || true' EXIT
           python -m coletor.archive export
           cd data
           git add --sparse -A .
           git commit -qm "Arquivo $(TZ=Europe/Lisbon date +%F)" || echo "Nada a arquivar"
-          git push -q origin HEAD:data
+          git push -q "$DATA_URL" HEAD:data
 
       - name: Limpar estado arquivado
-        if: steps.arq.outputs.pending != '0' && steps.arq.outputs.data_ok == '1'
+        if: steps.recolher.outputs.ignorada != '1' && steps.arq.outputs.pending != '0' && steps.arq.outputs.data_ok == '1'
         run: python -m coletor.archive cleanup
 
       - name: Guardar estado
         # Não corre se o job for cancelado (incluindo por limite de tempo): mantém-se o estado anterior.
-        if: ${{ !cancelled() }}
+        # Não corre numa recolha ignorada pelo intervalo mínimo: o estado não mudou.
+        if: ${{ !cancelled() && steps.recolher.outputs.ignorada != '1' }}
         env:
           DATA_REPO: ${{ secrets.DATA_REPO }}
           DATA_TOKEN: ${{ secrets.DATA_TOKEN }}
@@ -130,7 +150,7 @@ jobs:
               echo "::warning::Push do estado falhou; nova tentativa daqui a ${espera} s."
               sleep "$espera"
             fi
-            git push -qf origin snap:state && { ok=1; break; }
+            git push -qf "$DATA_URL" snap:state && { ok=1; break; }
           done
           if [ "$ok" = 0 ]; then echo "::error::Push do estado falhou após 4 tentativas."; exit 1; fi
           echo "Estado guardado."
