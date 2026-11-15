@@ -38,6 +38,15 @@ def write_summary():
             f.write("\n".join(SUMMARY) + "\n")
 
 
+def step_output(**kw):
+    """Escreve saídas do passo em $GITHUB_OUTPUT (sem efeito fora do Actions)."""
+    path = os.environ.get("GITHUB_OUTPUT")
+    if path:
+        with open(path, "a", encoding="utf-8") as f:
+            for k, v in kw.items():
+                f.write(f"{k}={v}\n")
+
+
 def md(x):
     return str(x).replace("|", "\\|")
 
@@ -72,22 +81,53 @@ def pick_headers(h):
     return out
 
 
-def fetch(url, extra_headers=None, retries=None):
-    """Devolve (conteúdo, código HTTP, cabeçalhos relevantes, início do pedido)."""
+class PrazoEsgotado(Exception):
+    pass
+
+
+def read_body(r, deadline):
+    """Lê a resposta em blocos; interrompe quando o prazo (time.time() absoluto) passa."""
+    parts = []
+    for chunk in r.iter_content(C.HTTP_CHUNK):
+        parts.append(chunk)
+        if deadline is not None and time.time() > deadline:
+            raise PrazoEsgotado("prazo esgotado durante a leitura da resposta")
+    return b"".join(parts)
+
+
+def fetch(url, extra_headers=None, retries=None, deadline=None):
+    """Devolve (conteúdo, código HTTP, cabeçalhos relevantes, início do pedido).
+
+    deadline (time.time() absoluto, opcional): nenhuma tentativa começa depois dele, as pausas
+    entre tentativas não o ultrapassam, os timeouts de cada pedido são limitados ao tempo restante
+    e a leitura é interrompida quando ele passa.
+    """
     last = None
     retries = retries or C.HTTP_RETRIES
     headers = {"User-Agent": C.USER_AGENT, "Accept-Encoding": "gzip", **(extra_headers or {})}
     for attempt in range(retries):
+        timeout = C.HTTP_TIMEOUT
+        if deadline is not None:
+            restante = deadline - time.time()
+            if restante <= 0:
+                last = f"{last} · prazo esgotado" if last else "prazo esgotado"
+                break
+            timeout = tuple(max(1, min(t, restante)) for t in C.HTTP_TIMEOUT)
         start = datetime.now(timezone.utc)
         try:
-            r = requests.get(url, timeout=C.HTTP_TIMEOUT, headers=headers)
-            if r.status_code != 304:
-                r.raise_for_status()
-            return r.content, r.status_code, pick_headers(r.headers), start
+            with requests.get(url, timeout=timeout, headers=headers, stream=True) as r:
+                if r.status_code != 304:
+                    r.raise_for_status()
+                content = read_body(r, deadline)
+                return content, r.status_code, pick_headers(r.headers), start
         except Exception as e:  # noqa: BLE001
             last = e
             if attempt < retries - 1:  # sem pausa depois da última tentativa
-                time.sleep(5 * (attempt + 1) ** 2)
+                pausa = 5 * (attempt + 1) ** 2
+                if deadline is not None and time.time() + pausa >= deadline:
+                    last = f"{e} · prazo esgotado"
+                    break
+                time.sleep(pausa)
     raise RuntimeError(f"{url}: {last}")
 
 
@@ -154,16 +194,21 @@ def save_debug(raw, err):
                 f"--- INÍCIO ---\n{head}\n--- FIM ---\n{tail}\n")
 
 
-def fetch_parse_status(cond=None, attempts=2, wait_s=20):
+def fetch_parse_status(cond=None, attempts=2, wait_s=20, deadline=None):
     """Descarrega e lê o feed; repete se a resposta vier inválida (ex.: truncada).
 
+    deadline (time.time() absoluto): prazo total do conjunto das tentativas (ver fetch).
     Devolve um dicionário com raw, http, hdr, start, rows, excerpt, pub, retries.
     Com resposta 304 (sem alterações), rows fica None.
     """
     last = None
     for i in range(attempts):
+        if i and deadline is not None and time.time() + wait_s >= deadline:
+            raise FeedError(f"{last} · prazo de {C.FEED_DEADLINE_S} s esgotado")
+        if i:
+            time.sleep(wait_s)
         try:
-            raw, http, hdr, start = fetch(C.STATUS_URL, cond)
+            raw, http, hdr, start = fetch(C.STATUS_URL, cond, deadline=deadline)
         except Exception as e:  # noqa: BLE001
             raise FeedError(f"download falhou: {e}") from e
         res = {"raw": raw, "http": http, "hdr": hdr, "start": start, "retries": i,
@@ -177,9 +222,12 @@ def fetch_parse_status(cond=None, attempts=2, wait_s=20):
         except Exception as e:  # noqa: BLE001 — XML inválido ou truncado
             last = f"XML inválido ({len(raw)/1e6:.1f} MB): {type(e).__name__}: {e}"
             save_debug(raw, last)
-            if i < attempts - 1:
-                time.sleep(wait_s)
     raise FeedError(last)
+
+
+def feed_deadline(t0):
+    """Prazo de uma descarga do feed: FEED_DEADLINE_S, sem passar o limite da execução."""
+    return min(time.time() + C.FEED_DEADLINE_S, t0 + C.FEED_LIMITE_EXECUCAO_S)
 
 
 def fetch_parse_infra(deadline):
@@ -465,8 +513,12 @@ def main():
     if last.get("ts_utc") and not force:
         prev = datetime.fromisoformat(last["ts_utc"].replace("Z", "+00:00"))
         if (now - prev).total_seconds() < C.MIN_INTERVAL_S:
-            print(f"Recolha anterior há {(now - prev).total_seconds():.0f}s — ignorada.")
+            # O workflow lê esta saída: uma recolha ignorada não guarda o estado nem arquiva.
+            step_output(ignorada=1)
+            say(f"- Recolha anterior há {(now - prev).total_seconds():.0f}s — ignorada "
+                f"(intervalo mínimo de {C.MIN_INTERVAL_S} s); estado não gravado.")
             return 0
+    step_output(ignorada=0)
     last["ts_utc"] = iso(now)
     save_json(C.STATE_DIR / "last_run.json", last)
 
@@ -499,7 +551,7 @@ def process(now, t0, last):
         cond["If-None-Match"] = last["etag"]
 
     try:
-        res = fetch_parse_status(cond)
+        res = fetch_parse_status(cond, deadline=feed_deadline(t0))
     except FeedError as e:
         record_sample(now, err=str(e)[:300], secs=round(time.time() - t0, 1))
         say(f"> ❌ Feed dinâmico indisponível ou inválido: {erro_curto(e)}")
@@ -521,7 +573,7 @@ def process(now, t0, last):
             time.sleep(max(0, wait))
             wait_s, waited = round(wait), True
             try:
-                res2 = fetch_parse_status(cond)
+                res2 = fetch_parse_status(cond, deadline=feed_deadline(t0))
                 if res2["http"] != 304 and res2["pub"] is not None and res2["pub"] > last_pub:
                     res = res2
                     say("- Nova versão obtida após a espera.")

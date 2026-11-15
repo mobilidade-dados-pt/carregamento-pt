@@ -88,14 +88,19 @@ TEXTO = WORKFLOW.read_text(encoding="utf-8")
 PASSOS = passos(TEXTO)
 
 
-def correr_passo(nome, cwd, extra_env=None):
-    """Corre o bloco `run` de um passo com bash -eo pipefail (como o Actions)."""
+def correr_passo(nome, cwd, extra_env=None, workflow=None):
+    """Corre o bloco `run` de um passo com bash -eo pipefail (como o Actions).
+
+    workflow: passos de outro workflow (por omissão, os do recolha.yml).
+    """
     script = Path(cwd) / f".passo_{nome.replace(' ', '_')}.sh"
-    script.write_text(PASSOS[nome]["run"], encoding="utf-8")
+    script.write_text((workflow or PASSOS)[nome]["run"], encoding="utf-8")
     env = {"PATH": os.environ["PATH"], "HOME": str(cwd), "LANG": "C.UTF-8",
            "DATA_REPO": REPO, "DATA_TOKEN": TOKEN, **(extra_env or {})}
+    # encoding explícito: no Windows o texto seria lido em cp1252 e os acentos falhariam.
     r = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
-                       cwd=cwd, env=env, capture_output=True, text=True, timeout=60)
+                       cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8",
+                       timeout=60)
     script.unlink()
     return r
 
